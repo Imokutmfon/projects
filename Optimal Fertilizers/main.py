@@ -1,1 +1,127 @@
-{"metadata":{"kernelspec":{"language":"python","display_name":"Python 3","name":"python3"},"language_info":{"name":"python","version":"3.11.11","mimetype":"text/x-python","codemirror_mode":{"name":"ipython","version":3},"pygments_lexer":"ipython3","nbconvert_exporter":"python","file_extension":".py"},"kaggle":{"accelerator":"none","dataSources":[{"sourceId":91717,"databundleVersionId":12184666,"sourceType":"competition"}],"dockerImageVersionId":31040,"isInternetEnabled":true,"language":"python","sourceType":"script","isGpuEnabled":false}},"nbformat_minor":4,"nbformat":4,"cells":[{"cell_type":"code","source":"import numpy as np\nimport pandas as pd\nimport matplotlib.pyplot as plt\nimport seaborn as sns\nimport tensorflow as tf\nimport warnings\nwarnings.filterwarnings(\"ignore\", category=FutureWarning)\nwarnings.filterwarnings(\"ignore\", category=UserWarning)\n\ntrain_dir = \"/kaggle/input/playground-series-s5e6/train.csv\"\ntest_dir = \"/kaggle/input/playground-series-s5e6/test.csv\"\nsample_submission_dir = \"/kaggle/input/playground-series-s5e6/sample_submission.csv\"\n\ndef load_data(directory):\n    data = pd.read_csv(directory)\n    return data\n\ndef split_data(data):\n    data = data.dropna()\n    X = data.drop(columns=['id', 'Fertilizer Name'])\n    y = data['Fertilizer Name']\n    return X, y\n\ndef preprocess_data(X):\n    num_cols = X.select_dtypes(include=np.number).columns.tolist()\n    cat_cols = X.select_dtypes(include='object').columns.tolist()\n    num_features = X[num_cols]\n    num_features_dict = {key: value.to_numpy()[:, tf.newaxis] for key, value in dict(num_features).items()}\n    \n    inputs={}\n    for name, column in X.items():\n        if type(column[0]) == str:\n            dtype = tf.string\n        elif name in cat_cols:\n            dtype = tf.int64\n        else:\n            dtype = tf.float32\n        inputs[name] = tf.keras.Input(shape=(1,), name=name, dtype=dtype)\n    \n    normalizer = tf.keras.layers.Normalization(axis=-1)\n    normalizer.adapt(np.concatenate([value for key, value in sorted(num_features_dict.items())]))\n    num_inputs=[]\n    for name in num_cols:\n        num_inputs.append(inputs[name])\n    num_inputs = tf.keras.layers.Concatenate(axis=-1)(num_inputs)\n    num_normalized = normalizer(num_inputs)\n    preprocessed=[]\n    preprocessed.append(num_normalized)\n    \n    for name in cat_cols:\n        vocab = sorted(set(X[name]))\n        print(f'name: {name}')\n        print(f\"vocab: {vocab}\\n\")\n        if type(vocab[0]) is str:\n            lookup = tf.keras.layers.StringLookup(vocabulary=vocab, output_mode='one_hot')\n        else:\n            lookup = tf.keras.layers.IntegerLookup(vocabulary=vocab, output_mode='one_hot')\n        x = inputs[name]\n        x = lookup(x)\n        preprocessed.append(x)\n    preprocessed_result = tf.keras.layers.Concatenate(axis=1)(preprocessed)\n    return inputs, preprocessed_result\n\ndef process_labels(y_train):\n    vocab = sorted(y_train.unique())\n    vocab_tensor = tf.constant(vocab)\n    lookup_table = tf.lookup.StaticHashTable(\n        tf.lookup.KeyValueTensorInitializer(vocab_tensor, tf.range(len(vocab))),\n        default_value=-1\n    )\n    return lookup_table, vocab_tensor\n\ndef build_model(inputs, preprocessor, num_classes):\n    x = preprocessor(inputs)\n    body = tf.keras.Sequential([\n        tf.keras.layers.Dense(10, activation='relu'),\n        tf.keras.layers.Dense(10, activation='relu'),\n        tf.keras.layers.Dense(num_classes, activation='softmax')\n    ])\n    result = body(x)\n    model = tf.keras.Model(inputs, result)\n    model.compile(optimizer='adam',\n                  loss='categorical_crossentropy',\n                  metrics=['accuracy'])\n    return model\n\ndef master():\n    train_data = load_data(train_dir)\n    test_data = load_data(test_dir)\n    sample_submission = load_data(sample_submission_dir)\n    \n    X_train, y_train = split_data(train_data)\n    inputs, preprocessed_result = preprocess_data(X_train)\n    preprocessor = tf.keras.Model(inputs, preprocessed_result)\n    \n    label_lookup, label_vocab = process_labels(y_train)\n    y_indices = label_lookup.lookup(tf.constant(y_train.values))\n    y_encoded = tf.one_hot(y_indices, depth=len(label_vocab))\n    \n    model = build_model(inputs, preprocessor, len(label_vocab))\n    \n    ds = tf.data.Dataset.from_tensor_slices((dict(X_train), y_encoded))\n    ds = ds.shuffle(len(y_train)).batch(512).prefetch(tf.data.AUTOTUNE)\n    history = model.fit(ds, epochs=5)\n    \n    X_test = test_data.drop(columns=['id'])\n    test_dict = {name: column.values for name, column in X_test.items()}\n    \n    predictions = model.predict(test_dict)\n    predicted_indices = tf.argmax(predictions, axis=1)\n    predicted_labels = tf.gather(label_vocab, predicted_indices)\n    final_predictions = predicted_labels.numpy().astype(str)\n    \n    sample_submission['Fertilizer Name'] = final_predictions\n    sample_submission.to_csv('submission.csv', index=False)\n    \n    return model, history, final_predictions\n\nif __name__ == '__main__':\n    model, history, predictions = master()","metadata":{"_uuid":"8154b162-58c5-4da5-8a02-a8aafcb294de","_cell_guid":"83e5e502-e4c3-4adf-b80f-3e7e6b07c64f","trusted":true,"collapsed":false,"jupyter":{"outputs_hidden":false},"execution":{"iopub.status.busy":"2025-06-27T07:03:47.922157Z","iopub.execute_input":"2025-06-27T07:03:47.922511Z"}},"outputs":[{"name":"stdout","text":"name: Soil Type\nvocab: ['Black', 'Clayey', 'Loamy', 'Red', 'Sandy']\n\nname: Crop Type\nvocab: ['Barley', 'Cotton', 'Ground Nuts', 'Maize', 'Millets', 'Oil seeds', 'Paddy', 'Pulses', 'Sugarcane', 'Tobacco', 'Wheat']\n\nEpoch 1/5\n\u001b[1m 908/1465\u001b[0m \u001b[32m━━━━━━━━━━━━\u001b[0m\u001b[37m━━━━━━━━\u001b[0m \u001b[1m3s\u001b[0m 6ms/step - accuracy: 0.1482 - loss: 1.9517","output_type":"stream"}],"execution_count":null}]}
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import tensorflow as tf
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+
+train_dir = "/kaggle/input/playground-series-s5e6/train.csv"
+test_dir = "/kaggle/input/playground-series-s5e6/test.csv"
+sample_submission_dir = "/kaggle/input/playground-series-s5e6/sample_submission.csv"
+
+def load_data(directory):
+    data = pd.read_csv(directory)
+    return data
+
+def split_data(data):
+    data = data.dropna()
+    X = data.drop(columns=['id', 'Fertilizer Name'])
+    y = data['Fertilizer Name']
+    return X, y
+
+def preprocess_data(X):
+    num_cols = X.select_dtypes(include=np.number).columns.tolist()
+    cat_cols = X.select_dtypes(include='object').columns.tolist()
+    num_features = X[num_cols]
+    num_features_dict = {key: value.to_numpy()[:, tf.newaxis] for key, value in dict(num_features).items()}
+    
+    inputs={}
+    for name, column in X.items():
+        if type(column[0]) == str:
+            dtype = tf.string
+        elif name in cat_cols:
+            dtype = tf.int64
+        else:
+            dtype = tf.float32
+        inputs[name] = tf.keras.Input(shape=(1,), name=name, dtype=dtype)
+    
+    normalizer = tf.keras.layers.Normalization(axis=-1)
+    normalizer.adapt(np.concatenate([value for key, value in sorted(num_features_dict.items())]))
+    num_inputs=[]
+    for name in num_cols:
+        num_inputs.append(inputs[name])
+    num_inputs = tf.keras.layers.Concatenate(axis=-1)(num_inputs)
+    num_normalized = normalizer(num_inputs)
+    preprocessed=[]
+    preprocessed.append(num_normalized)
+    
+    for name in cat_cols:
+        vocab = sorted(set(X[name]))
+        print(f'name: {name}')
+        print(f"vocab: {vocab}\n")
+        if type(vocab[0]) is str:
+            lookup = tf.keras.layers.StringLookup(vocabulary=vocab, output_mode='one_hot')
+        else:
+            lookup = tf.keras.layers.IntegerLookup(vocabulary=vocab, output_mode='one_hot')
+        x = inputs[name]
+        x = lookup(x)
+        preprocessed.append(x)
+    preprocessed_result = tf.keras.layers.Concatenate(axis=1)(preprocessed)
+    return inputs, preprocessed_result
+
+def process_labels(y_train):
+    vocab = sorted(y_train.unique())
+    vocab_tensor = tf.constant(vocab)
+    lookup_table = tf.lookup.StaticHashTable(
+        tf.lookup.KeyValueTensorInitializer(vocab_tensor, tf.range(len(vocab))),
+        default_value=-1
+    )
+    return lookup_table, vocab_tensor
+
+def build_model(inputs, preprocessor, num_classes):
+    x = preprocessor(inputs)
+    body = tf.keras.Sequential([
+        tf.keras.layers.Dense(10, activation='relu'),
+        tf.keras.layers.Dense(10, activation='relu'),
+        tf.keras.layers.Dense(num_classes, activation='softmax')
+    ])
+    result = body(x)
+    model = tf.keras.Model(inputs, result)
+    model.compile(optimizer='adam',
+                  loss='categorical_crossentropy',
+                  metrics=['accuracy'])
+    return model
+
+def master():
+    train_data = load_data(train_dir)
+    test_data = load_data(test_dir)
+    sample_submission = load_data(sample_submission_dir)
+    
+    X_train, y_train = split_data(train_data)
+    inputs, preprocessed_result = preprocess_data(X_train)
+    preprocessor = tf.keras.Model(inputs, preprocessed_result)
+    
+    label_lookup, label_vocab = process_labels(y_train)
+    y_indices = label_lookup.lookup(tf.constant(y_train.values))
+    y_encoded = tf.one_hot(y_indices, depth=len(label_vocab))
+    
+    model = build_model(inputs, preprocessor, len(label_vocab))
+    
+    ds = tf.data.Dataset.from_tensor_slices((dict(X_train), y_encoded))
+    ds = ds.shuffle(len(y_train)).batch(512).prefetch(tf.data.AUTOTUNE)
+    history = model.fit(ds, epochs=5)
+    
+    X_test = test_data.drop(columns=['id'])
+    test_dict = {name: column.values for name, column in X_test.items()}
+    
+    predictions = model.predict(test_dict)
+    
+    # Get top 3 predictions for MAP@3
+    top3_indices = tf.nn.top_k(predictions, k=3).indices
+    top3_labels = tf.gather(label_vocab, top3_indices)
+    
+    # Convert to space-delimited strings
+    final_predictions = []
+    for row in top3_labels.numpy():
+        prediction_str = ' '.join([label.decode('utf-8') for label in row])
+        final_predictions.append(prediction_str)
+    
+    sample_submission['Fertilizer Name'] = final_predictions
+    sample_submission.to_csv('submission.csv', index=False)
+    
+    return model, history, final_predictions
+
+if __name__ == '__main__':
+    model, history, predictions = master()
