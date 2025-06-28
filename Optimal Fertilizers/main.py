@@ -1,3 +1,4 @@
+# %% [code]
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -84,29 +85,65 @@ def build_model(inputs, preprocessor, num_classes):
                   metrics=['accuracy'])
     return model
 
+def evaluate_map3(y_true_indices, y_pred_probs, k=3):
+    top_k_indices = tf.nn.top_k(y_pred_probs, k=k).indices
+    y_true_expanded = tf.expand_dims(y_true_indices, axis=1)
+    matches = tf.equal(top_k_indices, y_true_expanded)
+    
+    precisions = tf.cumsum(tf.cast(matches, tf.float32), axis=1) / tf.range(1, k+1, dtype=tf.float32)
+    ap = tf.reduce_sum(precisions * tf.cast(matches, tf.float32), axis=1)
+    return tf.reduce_mean(ap)
+
 def master():
+    print("Loading Data")
     train_data = load_data(train_dir)
     test_data = load_data(test_dir)
     sample_submission = load_data(sample_submission_dir)
-    
-    X_train, y_train = split_data(train_data)
-    inputs, preprocessed_result = preprocess_data(X_train)
+
+    print("Split Data")
+    X, y = split_data(train_data)
+    train_size = int(0.8 * len(X))
+    X_train = X.iloc[:train_size]
+    X_val = X.iloc[train_size:]
+    y_train = y.iloc[:train_size]
+    y_val = y.iloc[train_size:]
+
+    print("Preprocess data")
+    inputs, preprocessed_result = preprocess_data(X)
     preprocessor = tf.keras.Model(inputs, preprocessed_result)
+
+    label_lookup, label_vocab = process_labels(y)
+
+    y_train_indices = label_lookup.lookup(tf.constant(y_train.values))
+    y_train_encoded = tf.one_hot(y_train_indices, depth=len(label_vocab))
     
-    label_lookup, label_vocab = process_labels(y_train)
-    y_indices = label_lookup.lookup(tf.constant(y_train.values))
-    y_encoded = tf.one_hot(y_indices, depth=len(label_vocab))
+    y_val_indices = label_lookup.lookup(tf.constant(y_val.values))
+    y_val_encoded = tf.one_hot(y_val_indices, depth=len(label_vocab))
+    
     
     model = build_model(inputs, preprocessor, len(label_vocab))
     
-    ds = tf.data.Dataset.from_tensor_slices((dict(X_train), y_encoded))
-    ds = ds.shuffle(len(y_train)).batch(512).prefetch(tf.data.AUTOTUNE)
-    history = model.fit(ds, epochs=5)
+    train_ds = tf.data.Dataset.from_tensor_slices((dict(X_train), y_train_encoded))
+    train_ds = train_ds.shuffle(len(y_train)).batch(512).prefetch(tf.data.AUTOTUNE)
+    val_ds = tf.data.Dataset.from_tensor_slices((dict(X_val), y_val_encoded))
+    val_ds = val_ds.batch(512).prefetch(tf.data.AUTOTUNE)
+
+    print("Training model")
+
+    history = model.fit(train_ds, validation_data=val_ds, epochs=5, verbose=2)
+
+    # Evaluate Model
+    print("Evaluating Model")
+    val_dict = {name: column.values for name, column in X_val.items()}
+    val_predictions = model.predict(val_dict, verbose=2)
+    map3_score = evaluate_map3(y_val_indices, val_predictions)
+    print(f"Validation MAP@3: {map3_score:.4f}")
+    
     
     X_test = test_data.drop(columns=['id'])
     test_dict = {name: column.values for name, column in X_test.items()}
-    
-    predictions = model.predict(test_dict)
+    print("predicting on test set")
+    predictions = model.predict(test_dict, verbose=2)
     
     # Get top 3 predictions for MAP@3
     top3_indices = tf.nn.top_k(predictions, k=3).indices
@@ -117,11 +154,11 @@ def master():
     for row in top3_labels.numpy():
         prediction_str = ' '.join([label.decode('utf-8') for label in row])
         final_predictions.append(prediction_str)
-    
+    print("Creating Submission file")
     sample_submission['Fertilizer Name'] = final_predictions
     sample_submission.to_csv('submission.csv', index=False)
     
-    return model, history, final_predictions
+    return model, history, sample_submission
 
 if __name__ == '__main__':
-    model, history, predictions = master()
+    model, history, sample_submission = master()
