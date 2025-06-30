@@ -16,6 +16,44 @@ def load_data(directory):
     data = pd.read_csv(directory)
     return data
 
+def feature_engineering(df):
+    df = df.copy()
+    
+    df['N_to_P_ratio'] = df['Nitrogen'] / (df['Phosphorous'] + 1e-5)
+    df['N_to_K_ratio'] = df['Nitrogen'] / (df['Potassium'] + 1e-5)
+    df['P_to_K_ratio'] = df['Phosphorous'] / (df['Potassium'] + 1e-5)
+    
+    df['Effective_Nitrogen'] = df['Moisture'] * df['Nitrogen']
+    df['Effective_Phosphorous'] = df['Moisture'] * df['Phosphorous']
+    
+    df['Weather_Index'] = df['Temparature'] * df['Humidity']
+    
+    df['Temperature_Category'] = pd.cut(
+        df['Temparature'], 
+        bins=3, 
+        labels=['low', 'medium', 'high']
+    ).astype(str)
+    
+    df['Humidity_Category'] = pd.cut(
+        df['Humidity'], 
+        bins=3, 
+        labels=['low', 'medium', 'high']
+    ).astype(str)
+    
+    df['Moisture_Category'] = pd.cut(
+        df['Moisture'], 
+        bins=3, 
+        labels=['low', 'medium', 'high']
+    ).astype(str)
+    
+    print("Feature engineering completed. New features added:")
+    print("- Nutrient ratios: N_to_P_ratio, N_to_K_ratio, P_to_K_ratio")
+    print("- Moisture-nutrient interactions: Effective_Nitrogen, Effective_Phosphorous")
+    print("- Environmental index: Weather_Index")
+    print("- Categorical bins: Temperature_Category, Humidity_Category, Moisture_Category")
+    
+    return df
+
 def split_data(data):
     data = data.dropna()
     X = data.drop(columns=['id', 'Fertilizer Name'])
@@ -77,14 +115,21 @@ def process_labels(y_train):
 def build_model(inputs, preprocessor, num_classes):
     x = preprocessor(inputs)
     
-    x = tf.keras.layers.Dense(256, activation='relu')(x)
+    x = tf.keras.layers.Dense(512, activation='relu')(x)
     x = tf.keras.layers.BatchNormalization()(x)
     x = tf.keras.layers.Dropout(0.4)(x)
-    x = tf.keras.layers.Dense(128, activation='relu')(x)
+    
+    x = tf.keras.layers.Dense(256, activation='relu')(x)
     x = tf.keras.layers.BatchNormalization()(x)
     x = tf.keras.layers.Dropout(0.3)(x)
-    x = tf.keras.layers.Dense(64, activation='relu')(x)
+    
+    x = tf.keras.layers.Dense(128, activation='relu')(x)
+    x = tf.keras.layers.BatchNormalization()(x)
     x = tf.keras.layers.Dropout(0.2)(x)
+    
+    x = tf.keras.layers.Dense(64, activation='relu')(x)
+    x = tf.keras.layers.Dropout(0.1)(x)
+    
     x = tf.keras.layers.Dense(num_classes, activation='softmax')(x)
     
     model = tf.keras.Model(inputs, x)
@@ -110,10 +155,16 @@ def master():
     test_data = load_data(test_dir)
     sample_submission = load_data(sample_submission_dir)
     
-    print("Split Data")
-    X, y = split_data(train_data)
+    print("Performing Feature Engineering on Training Data")
+    train_data_engineered = feature_engineering(train_data)
     
-    print(f"Dataset shape: {X.shape}")
+    print("Performing Feature Engineering on Test Data")
+    test_data_engineered = feature_engineering(test_data)
+    
+    print("Split Data")
+    X, y = split_data(train_data_engineered)
+    
+    print(f"Dataset shape after feature engineering: {X.shape}")
     print(f"Class distribution:\n{y.value_counts()}")
     print(f"Feature types:\n{X.dtypes}")
     
@@ -144,12 +195,12 @@ def master():
     val_ds = val_ds.batch(256).prefetch(tf.data.AUTOTUNE)
     
     callbacks = [
-        tf.keras.callbacks.EarlyStopping(patience=10, restore_best_weights=True),
-        tf.keras.callbacks.ReduceLROnPlateau(patience=5, factor=0.5)
+        tf.keras.callbacks.EarlyStopping(patience=15, restore_best_weights=True),
+        tf.keras.callbacks.ReduceLROnPlateau(patience=7, factor=0.5)
     ]
     
     print("Training model")
-    history = model.fit(train_ds, validation_data=val_ds, epochs=30, callbacks=callbacks, verbose=2)
+    history = model.fit(train_ds, validation_data=val_ds, epochs=100, callbacks=callbacks, verbose=2)
     
     print("Evaluating Model")
     val_dict = {name: column.values for name, column in X_val.items()}
@@ -157,9 +208,9 @@ def master():
     map3_score = evaluate_map3(y_val_indices, val_predictions)
     print(f"Validation MAP@3: {map3_score:.4f}")
     
-    X_test = test_data.drop(columns=['id'])
+    X_test = test_data_engineered.drop(columns=['id'])
     test_dict = {name: column.values for name, column in X_test.items()}
-    print("predicting on test set")
+    print("Predicting on test set")
     predictions = model.predict(test_dict, verbose=2)
     
     top3_indices = tf.nn.top_k(predictions, k=3).indices
