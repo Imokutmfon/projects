@@ -1,9 +1,9 @@
-# %% [code]
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import tensorflow as tf
+from sklearn.model_selection import train_test_split
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -30,7 +30,7 @@ def preprocess_data(X):
     
     inputs={}
     for name, column in X.items():
-        if type(column[0]) == str:
+        if type(column.iloc[0]) == str:
             dtype = tf.string
         elif name in cat_cols:
             dtype = tf.int64
@@ -38,15 +38,17 @@ def preprocess_data(X):
             dtype = tf.float32
         inputs[name] = tf.keras.Input(shape=(1,), name=name, dtype=dtype)
     
-    normalizer = tf.keras.layers.Normalization(axis=-1)
-    normalizer.adapt(np.concatenate([value for key, value in sorted(num_features_dict.items())]))
-    num_inputs=[]
-    for name in num_cols:
-        num_inputs.append(inputs[name])
-    num_inputs = tf.keras.layers.Concatenate(axis=-1)(num_inputs)
-    num_normalized = normalizer(num_inputs)
     preprocessed=[]
-    preprocessed.append(num_normalized)
+    
+    if num_cols:
+        normalizer = tf.keras.layers.Normalization(axis=-1)
+        normalizer.adapt(np.concatenate([value for key, value in sorted(num_features_dict.items())]))
+        num_inputs=[]
+        for name in num_cols:
+            num_inputs.append(inputs[name])
+        num_inputs = tf.keras.layers.Concatenate(axis=-1)(num_inputs)
+        num_normalized = normalizer(num_inputs)
+        preprocessed.append(num_normalized)
     
     for name in cat_cols:
         vocab = sorted(set(X[name]))
@@ -59,6 +61,7 @@ def preprocess_data(X):
         x = inputs[name]
         x = lookup(x)
         preprocessed.append(x)
+    
     preprocessed_result = tf.keras.layers.Concatenate(axis=1)(preprocessed)
     return inputs, preprocessed_result
 
@@ -73,16 +76,23 @@ def process_labels(y_train):
 
 def build_model(inputs, preprocessor, num_classes):
     x = preprocessor(inputs)
-    body = tf.keras.Sequential([
-        tf.keras.layers.Dense(10, activation='relu'),
-        tf.keras.layers.Dense(10, activation='relu'),
-        tf.keras.layers.Dense(num_classes, activation='softmax')
-    ])
-    result = body(x)
-    model = tf.keras.Model(inputs, result)
-    model.compile(optimizer='adam',
-                  loss='categorical_crossentropy',
-                  metrics=['accuracy'])
+    
+    x = tf.keras.layers.Dense(256, activation='relu')(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.Dropout(0.4)(x)
+    x = tf.keras.layers.Dense(128, activation='relu')(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.Dropout(0.3)(x)
+    x = tf.keras.layers.Dense(64, activation='relu')(x)
+    x = tf.keras.layers.Dropout(0.2)(x)
+    x = tf.keras.layers.Dense(num_classes, activation='softmax')(x)
+    
+    model = tf.keras.Model(inputs, x)
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+        loss='categorical_crossentropy',
+        metrics=['accuracy']
+    )
     return model
 
 def evaluate_map3(y_true_indices, y_pred_probs, k=3):
@@ -99,61 +109,67 @@ def master():
     train_data = load_data(train_dir)
     test_data = load_data(test_dir)
     sample_submission = load_data(sample_submission_dir)
-
+    
     print("Split Data")
     X, y = split_data(train_data)
-    train_size = int(0.8 * len(X))
-    X_train = X.iloc[:train_size]
-    X_val = X.iloc[train_size:]
-    y_train = y.iloc[:train_size]
-    y_val = y.iloc[train_size:]
-
+    
+    print(f"Dataset shape: {X.shape}")
+    print(f"Class distribution:\n{y.value_counts()}")
+    print(f"Feature types:\n{X.dtypes}")
+    
+    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    
     print("Preprocess data")
     inputs, preprocessed_result = preprocess_data(X)
     preprocessor = tf.keras.Model(inputs, preprocessed_result)
-
-    label_lookup, label_vocab = process_labels(y)
-
+    
+    label_lookup, label_vocab = process_labels(y_train)
+    num_classes = len(label_vocab)
+    
     y_train_indices = label_lookup.lookup(tf.constant(y_train.values))
-    y_train_encoded = tf.one_hot(y_train_indices, depth=len(label_vocab))
+    y_train_encoded = tf.one_hot(y_train_indices, depth=num_classes)
     
     y_val_indices = label_lookup.lookup(tf.constant(y_val.values))
-    y_val_encoded = tf.one_hot(y_val_indices, depth=len(label_vocab))
+    y_val_encoded = tf.one_hot(y_val_indices, depth=num_classes)
     
+    print(f"Preprocessed feature shape: {preprocessed_result.shape}")
+    print(f"Number of classes: {num_classes}")
     
-    model = build_model(inputs, preprocessor, len(label_vocab))
+    print("Build model")
+    model = build_model(inputs, preprocessor, num_classes)
     
     train_ds = tf.data.Dataset.from_tensor_slices((dict(X_train), y_train_encoded))
-    train_ds = train_ds.shuffle(len(y_train)).batch(512).prefetch(tf.data.AUTOTUNE)
+    train_ds = train_ds.shuffle(len(y_train)).batch(256).prefetch(tf.data.AUTOTUNE)
     val_ds = tf.data.Dataset.from_tensor_slices((dict(X_val), y_val_encoded))
-    val_ds = val_ds.batch(512).prefetch(tf.data.AUTOTUNE)
-
+    val_ds = val_ds.batch(256).prefetch(tf.data.AUTOTUNE)
+    
+    callbacks = [
+        tf.keras.callbacks.EarlyStopping(patience=10, restore_best_weights=True),
+        tf.keras.callbacks.ReduceLROnPlateau(patience=5, factor=0.5)
+    ]
+    
     print("Training model")
-
-    history = model.fit(train_ds, validation_data=val_ds, epochs=5, verbose=2)
-
-    # Evaluate Model
+    history = model.fit(train_ds, validation_data=val_ds, epochs=30, callbacks=callbacks, verbose=2)
+    
     print("Evaluating Model")
     val_dict = {name: column.values for name, column in X_val.items()}
     val_predictions = model.predict(val_dict, verbose=2)
     map3_score = evaluate_map3(y_val_indices, val_predictions)
     print(f"Validation MAP@3: {map3_score:.4f}")
     
-    
     X_test = test_data.drop(columns=['id'])
     test_dict = {name: column.values for name, column in X_test.items()}
     print("predicting on test set")
     predictions = model.predict(test_dict, verbose=2)
     
-    # Get top 3 predictions for MAP@3
     top3_indices = tf.nn.top_k(predictions, k=3).indices
     top3_labels = tf.gather(label_vocab, top3_indices)
     
-    # Convert to space-delimited strings
     final_predictions = []
     for row in top3_labels.numpy():
         prediction_str = ' '.join([label.decode('utf-8') for label in row])
         final_predictions.append(prediction_str)
+    
     print("Creating Submission file")
     sample_submission['Fertilizer Name'] = final_predictions
     sample_submission.to_csv('submission.csv', index=False)
